@@ -1,0 +1,330 @@
+---
+title: "Chinbook"
+output: html_notebook
+Description: use data from an SQL database to determine the most popular genre and album based on sales record. Also visualize the findings.
+---
+1. load libraries
+
+```{r}
+#install.packages("RSQLite")
+library(RSQLite)
+library(DBI)
+
+```
+2. make helper functions
+
+```{r}
+run_query <- function (query) {
+  conn <- dbConnect(SQLite(), "chinook.db")
+  result <- dbGetQuery(conn, query)
+  dbDisconnect(conn)
+  return(result)
+}
+
+#start using the combination of single and double quotes
+#interesting way of looking at tables as a whole
+show_tables <- function () {
+query <- 'SELECT
+            name,
+            type
+          FROM sqlite_master
+          WHERE type IN ("table","view");'
+run_query(query)
+}
+
+tables <- show_tables()
+```
+
+Quest A. Genre recommendation
+A.1, query the absolute and percentage of tracks solde for each Genre
+```{r}
+query1 <- "
+SELECT 
+  g.name genre_name,
+  COUNT(g.name) track_total,
+  ROUND(CAST(COUNT(g.name) AS Float)/
+    CAST(
+          (
+          SELECT 
+            COUNT(il.track_id) total_all_genre
+          FROM invoice_line il 
+          ) AS Float),4) track_percent
+FROM genre g
+LEFT JOIN track t ON g.genre_id = t.genre_id
+LEFT JOIN invoice_line il ON il.track_id = t.track_id
+WHERE il.invoice_id IS NOT NULL
+GROUP BY g.name
+ORDER BY track_total DESC
+"
+
+query2 <- "SELECT 
+  g.name genre_name,
+  COUNT(g.name) track_total,
+  ROUND(CAST(COUNT(g.name) AS Float)/
+    CAST((SELECT 
+            COUNT(il.track_id) total_all_genre
+          FROM invoice_line il
+          ) AS Float),4) track_percent
+FROM invoice_line il
+LEFT JOIN track t ON il.track_id = t.track_id
+LEFT JOIN genre g ON t.genre_id = g.genre_id
+GROUP BY g.name
+ORDER BY track_total DESC"
+
+#genre_table1 <- run_query(query1)
+genre_table <- run_query(query2)
+
+```
+
+A.2. illustrations
+```{r}
+genre_in_quest <- c("Hip Hop","Punk","Pop","Blues")
+library(dplyr)
+library(stringr)
+library(ggplot2)
+plot_table <- genre_table %>%
+  filter(str_detect(genre_name,genre_in_quest[1]) 
+                    | str_detect(genre_name,genre_in_quest[2])
+                    | str_detect(genre_name,genre_in_quest[3]) 
+                    | str_detect(genre_name,genre_in_quest[4]))
+ggplot(data = plot_table) + 
+  aes(x = genre_name, y = track_total)+ 
+  geom_bar(stat = "identity")
+ggplot(data = plot_table) + 
+  aes(x = genre_name, y = track_percent*100)+ 
+  geom_bar(stat = "identity")
+```
+A.3. Recommendations:
+
+From the sales database, we calculated the number of tracks sold, as well as the percentage of tracks sold for each genre. The No.1 genre that has the most sale is "Rock", whic occupies 55% of the total sale. 
+
+When evaluating the four potential genres, we plotted their total sales and percentage. From the highest to the lowest sales, the four genres follows the order of "Punk", "Blues", "Pop" and "Hip-Hop" with number of tracks sold: 492, 124, 63, 33, and the percentages: 10.3%, 2.6%, 1.3%, 0.7%.
+
+So our recommendations of picking three genres out of the four would be: "Punk", "Blues" and "Pop".
+
+We would also recommending signing more "Rock" genres.
+
+Quest B. Sales support agents performance and potential relating factors
+B.1 prepare data for sales support agent
+```{r}
+query <- "
+SELECT 
+  e.first_name || ' ' || e.last_name employee_name,
+  SUM(i.total) total_sales_amount,
+  e.title,
+  e.reports_to,
+  e.birthdate,
+  e.hire_date
+FROM employee e
+LEFT JOIN customer c ON e.employee_id = c.support_rep_id
+LEFT JOIN invoice i ON c.customer_id = i.customer_id
+GROUP BY employee_name
+ORDER BY total_sales_amount DESC
+"
+employee_table <- run_query(query)
+
+employee_table_organized <- employee_table %>%
+  filter(!is.na(total_sales_amount))%>%
+           mutate(hire_date = as.Date(hire_date),birthdate = as.Date(birthdate)) %>%
+  mutate(hire_age = hire_date - birthdate) %>%
+  mutate(hire_age_year = round(as.numeric(hire_age)/365.25)) %>%
+  mutate(sex = c("Female","Female","Male")) %>%
+  select(employee_name, total_sales_amount, hire_date, hire_age_year, sex)
+```
+B.2. illustration
+```{r}
+ggplot(data = employee_table_organized) + 
+  aes(x = employee_name, y = total_sales_amount, size = hire_date, color = hire_age_year, shape = sex)+
+  geom_point()
+```
+
+B.3 Summary
+
+The three sales support agents ranked from top to bottom sales as follows: Jane Peacock, Margaret Park, and steven Johnson. There are three potential contibutors to the amount of total sales.
+
+1. Age at hires-- younger agent produces more sales
+The top 1 agent was the youngest at hire 44 yrs (the darker color of the shape shows the younger age), and the other two were 50 and older. Younger agent could be more advantageous in communicating with customers and thus potentially boost the total sales.
+
+2. Sex of the sales person-- female agent produces more sales
+The top 1 and 2 agents are both females (circles in the plot) and the bottom one is a male (triangle). There could be a sex difference in how agents interact with customers and could potentially contribute to the difference in total amount of sales.
+
+3. Duration at job -- an agent had longer duration at the job produces more sales than someone who had shorter duration at the job
+The top 1 and 2 agents were hired earlier than the third sales person, (the time of hire represented by the size of the shape, with earlier hire having a smaller size than the later hire,) thus would have worked at the job longer. Longer time at job would accumulate more experience and could potentially contribute to a higher sale amount.
+
+Quest C. collates data on purchases from different countries
+
+total number of customers
+total value of sales
+average value of sales per customer
+average order value
+
+C.1 create the query
+```{r}
+query <- '
+WITH 
+  customer_info AS (
+SELECT
+  country,
+  COUNT(DISTINCT(customer_id)) num_customer,
+  CASE
+    WHEN COUNT(DISTINCT(customer_id)) =1 THEN "Other"
+    ELSE country
+    END AS country_category
+FROM customer c
+GROUP BY country
+),
+  customer_info2 AS(
+SELECT 
+  country,
+  country_category,
+  SUM(num_customer) num_customer
+FROM customer_info
+GROUP BY country_category
+  )
+SELECT
+  c.country,
+  cc.country_category,
+  cc.num_customer,
+  SUM(i.total) total_sale,
+   CAST(SUM(i.total) AS Float)/CAST(cc.num_customer AS Float) sale_per_customer,
+   CAST(SUM(i.total) AS Float)/CAST(COUNT(i.invoice_id) AS Float) sale_per_invoice
+FROM customer_info2 cc
+LEFT JOIN customer c ON cc.country = c.country
+LEFT JOIN invoice i ON c.customer_id = i.customer_id
+GROUP BY country_category
+ORDER BY total_sale DESC
+'
+country_table <- run_query(query)
+```
+C.2 visulization
+```{r}
+#total number of customers
+plot_country_table <- country_table %>%
+  filter(country_category != "Other")
+ggplot(data = plot_country_table) + 
+  aes(x = country, y = num_customer) +
+  geom_bar(stat = "identity")
+
+ggplot(data = plot_country_table) + 
+  aes(x = country, y = total_sale) +
+  geom_bar(stat = "identity")
+
+ggplot(data = plot_country_table) + 
+  aes(x = country, y = sale_per_customer) +
+  geom_bar(stat = "identity")
+
+ggplot(data = plot_country_table) + 
+  aes(x = country, y = sale_per_invoice) +
+  geom_bar(stat = "identity")
+```
+C.3 recommendations:
+In general having more customers and increase sales per customer would boost the total sale for all countries. 
+
+From all the countries, USA has the largest amount of total sale, and the most number of customers. But the sale amount per customer and per invoice, USA is similar to most of the other countries. It means similar strategy should be used on USA to other countries, meaning increasing the number of customers and increasing the amout of sales per customer.
+
+Czech Republic had the highest sale per customer, but it only has a small number of customers. Increasing the number of customers in Czech Republic would be a way to most likely bring boost of total sale.
+
+Question D. evaluate the sales of whole album versus combination of tracks
+D.1. prepare the data
+why not just take all the tables and use dataframe to analyze them? Would be much simpler!
+
+```{r}
+query_template <- function(invoice_id) {
+  query <- 
+str_c('
+WITH 
+  invoice_to_album AS(
+SELECT 
+  i.invoice_id,
+  AVG(t.album_id) one_album_id
+FROM invoice i
+LEFT JOIN invoice_line il ON i.invoice_id = il.invoice_id
+LEFT JOIN track t ON il.track_id = t.track_id
+GROUP BY i.invoice_id
+),
+
+  invoice_to_track AS(
+SELECT 
+  i.invoice_id,
+  il.track_id
+  FROM invoice i
+LEFT JOIN invoice_line il ON i.invoice_id = il.invoice_id
+WHERE i.invoice_id == ', invoice_id, '
+),
+
+  album_to_track AS(
+SELECT
+  album_id,
+  track_id
+FROM track
+WHERE album_id == (
+SELECT one_album_id FROM invoice_to_album
+WHERE invoice_id == ', invoice_id, ')
+)
+
+SELECT
+invoice_id,
+CASE
+  WHEN
+    (SELECT track_id FROM invoice_to_track
+      EXCEPT
+    SELECT track_id FROM album_to_track
+    ) IS NULL
+    AND
+    (SELECT track_id FROM invoice_to_track
+    EXCEPT
+    SELECT track_id FROM album_to_track
+    ) IS NULL THEN "1"
+  ELSE "0"
+  END AS whole_album
+FROM invoice
+WHERE invoice_id == ', invoice_id
+  )
+return(query)
+}
+
+query1 <- '
+SELECT invoice_id,
+invoice_date,
+total
+FROM invoice
+ORDER BY invoice_id
+'
+invoice_table <- run_query(query1)
+invoice_list <- invoice_table$invoice_id
+
+for (invoice_id in invoice_list) {
+  print(invoice_id)
+  query <- query_template(invoice_id)
+  if (invoice_id == invoice_list[1]) {
+    invoice_category <- run_query(query)
+  }else {
+    invoice_category <- bind_rows(invoice_category,run_query(query))
+  }
+}
+invoice_table<- invoice_table %>% left_join(invoice_category, on = "invoice_id")
+```
+
+D.2 illustration
+```{r}
+ggplot(data = invoice_table) + 
+  aes(x = whole_album) + 
+  geom_bar()
+
+ggplot(data = invoice_table) + 
+  aes(x = whole_album, y = total) + 
+  geom_bar(stat = "identity")
+
+ggplot(data = invoice_table) + 
+  aes(x = whole_album, y = total) + 
+  geom_boxplot()
+
+ggplot(data = invoice_table) + 
+  aes(x = invoice_date, y = total, color = whole_album) + 
+  geom_point()
+
+```
+
+D.3 recommendation
+Comparing the two ways of selling tracks, 1 as a whole album, and 2 as manually picked tracks, method 2 had twice as many sales as method 1 (figure 1). Method 2 also generated 1.5 times total sales amount as method 1 (figure 2). Method 1 has a larger amount per sale than metho 2 (figure 3 and 4). It showed that selling music by tracks would create more total sales and total revenue, thus is recommended.
+
